@@ -1,0 +1,16 @@
+[package]
+name = "rust-tide-test"
+version = "0.1.0"
+authors = ["Jörn Horstmann <joern.horstmann@signavio.com>"]
+edition = "2018"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies.async-std]
+version = "1.5.0"
+features = ["attributes"]
+
+[dependencies]
+tide = "0.6.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
