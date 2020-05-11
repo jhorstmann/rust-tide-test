@@ -5,7 +5,11 @@ use serde::ser::SerializeSeq;
 use std::io;
 use std::pin::Pin;
 use std::task::{Context, Poll};
-use std::io::{Read, IoSliceMut, BufRead, Cursor};
+use serde_json::json;
+use std::convert::TryInto;
+use std::fmt::Debug;
+use serde::export::Formatter;
+use std::future::Future;
 
 #[derive(Debug, Serialize, Deserialize)]
 struct QueryResponse {
@@ -24,6 +28,15 @@ struct ErrorBody {
     message: String
 }
 
+impl Into<Response> for QueryResponse {
+    fn into(self) -> Response {
+        Response::new(StatusCode::Ok)
+            .body_json(&self)
+            .unwrap_or(Response::new(StatusCode::InternalServerError))
+    }
+}
+
+
 impl ErrorBody {
     fn new(message: String) -> Self {
         ErrorBody::with_status(500, message)
@@ -38,96 +51,70 @@ impl ErrorBody {
     }
 }
 
-fn handle_error(e: impl std::error::Error) -> Response {
-    let body = ErrorBody::with_status(400, e.to_string());
+type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
-    Response::new(400)
-        .body_json(&body)
-        .unwrap_or_else(|_| Response::new(500))
-}
+#[derive(Debug, Clone)]
+pub struct PrettyErrorMiddleware();
 
-macro_rules! try_or_400 {
-    ( $expression:expr ) => {
-        match $expression {
-            Ok(x) => x,
-            Err(e) => return handle_error(e)
+impl PrettyErrorMiddleware {
+    pub fn new() -> Self {
+        Self()
+    }
+
+    async fn handle_error<'a, State: Send + Sync + 'static>(
+        &'a self,
+        ctx: Request<State>,
+        next: Next<'a, State>,
+    ) -> Result {
+        match next.run(ctx).await {
+            Ok(res) => Ok(res),
+            Err(err) => {
+                let msg = err.to_string();
+                let status = err.status() as u16;
+                let body = ErrorBody {
+                    status,
+                    message: msg
+                };
+                Ok(Response::new(StatusCode::InternalServerError).body_json(&body).or_else(|serde_err| {
+                    println!("Could not serialize error message {}", err);
+                    Result::Err(err)
+                })?)
+            }
         }
     }
 }
 
-struct VecReader {
-    inner: io::Cursor<Vec<u8>>,
-}
-
-impl VecReader {
-    fn new(data: Vec<u8>) -> Self {
-        VecReader {
-            inner: io::Cursor::new(data),
-        }
-    }
-}
-
-impl io::Read for VecReader {
-    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        self.inner.read(buf)
-    }
-}
-
-impl io::BufRead for VecReader {
-    fn fill_buf(&mut self) -> io::Result<&[u8]> {
-        self.inner.fill_buf()
-    }
-    fn consume(&mut self, amt: usize) {
-        self.inner.consume(amt);
-    }
-}
-
-impl futures_io::AsyncRead for VecReader {
-    fn poll_read(mut self: Pin<&mut Self>, _: &mut Context<'_>, buf: &mut [u8]) -> Poll<io::Result<usize>>
-    {
-        Poll::Ready(io::Read::read(&mut *self, buf))
-    }
-
-    fn poll_read_vectored(mut self: Pin<&mut Self>, _: &mut Context<'_>, bufs: &mut [IoSliceMut<'_>]) -> Poll<io::Result<usize>>
-    {
-        Poll::Ready(io::Read::read_vectored(&mut *self, bufs))
-    }
-}
-
-impl futures_io::AsyncBufRead for VecReader {
-    fn poll_fill_buf(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<&[u8]>>
-    {
-        Poll::Ready(io::BufRead::fill_buf(self.get_mut()))
-    }
-
-    fn consume(self: Pin<&mut Self>, amt: usize) {
-        io::BufRead::consume(self.get_mut(), amt)
+impl<State: Send + Sync + 'static> Middleware<State> for PrettyErrorMiddleware {
+    fn handle<'a>(
+        &'a self,
+        ctx: Request<State>,
+        next: Next<'a, State>,
+    ) -> BoxFuture<'a, Result> {
+        Box::pin(async move { self.handle_error(ctx, next).await })
     }
 }
 
 
-async fn sample_data(mut req: Request<()>) -> Response {
 
-    let query : QueryRequest = try_or_400!(req.body_json().await);
+async fn sample_data(mut req: Request<()>) -> Result {
+
+    let query : QueryRequest = req.body_json().await?;
     dbg!(query.query);
 
-    let bytes: Vec<u8> = Vec::new();
-    //let cursor = Cursor::new(bytes);
+    let response = QueryResponse {
+        headers: vec!["foo".to_owned(), "bar".to_owned()],
+        data: vec![vec![json!(1.0), json!("choice")]]
+    };
 
-    let mut ser = serde_json::Serializer::new(bytes);
-    let mut seq = ser.serialize_seq(Some(2)).unwrap();
-    for i in 0..2 {
-        seq.serialize_element(&i).unwrap();
-    }
-    seq.end().unwrap();
-
-
-    Response::new(200).body(futures_util::io::Cursor::new(ser.into_inner()))
+    Ok(Response::new(StatusCode::Ok)
+           .body_json(&response)?)
 }
 
 #[async_std::main]
 async fn main()  {
     let mut app = tide::new();
+    app.middleware(PrettyErrorMiddleware::new());
+
     app.at("/").post(sample_data);
 
     app.listen("127.0.0.1:8080").await.unwrap();
