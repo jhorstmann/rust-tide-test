@@ -71,6 +71,11 @@ async fn test_error(_req: Request<()>) -> Result {
     ))
 }
 
+async fn test_sleep(_req: Request<()>) -> Result {
+    std::thread::sleep(std::time::Duration::from_secs(10));
+    Ok(Body::empty().into())
+}
+
 async fn pretty_error_middleware(mut response: Response) -> Result<Response> {
     if let Some(e) = response.error() {
         let msg = e.to_string();
@@ -100,6 +105,7 @@ async fn main() {
 
     app.at("/query").post(sample_data);
     app.at("/error").get(test_error);
+    app.at("/sleep").get(test_sleep);
 
     app.listen("127.0.0.1:8080").await.unwrap();
 }
